@@ -1,0 +1,4 @@
+[submodule "ffmpeg-sys"]
+	path = ffmpeg-sys
+	url = https://github.com/the8472/rust-ffmpeg-sys.git
+	branch = motion-fix
