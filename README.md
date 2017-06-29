@@ -1,6 +1,6 @@
 # stitch-animation
 
-Linear panning detection and scene extraction using motion vectors already present in video codecs.
+Linear panning detection and scene extraction using motion vectors provided by video codecs.
 
 For the moment the tool only extracts image sequences and does not align or blend them.
 Microsoft ICE, Gimp, Photoshop or similar are recommended to merge them.
@@ -15,7 +15,7 @@ Microsoft ICE, Gimp, Photoshop or similar are recommended to merge them.
 ## Build
 
 ```sh
-git clone --recursive
+git clone --recursive https://github.com/the8472/stitch-animation.git
 cd stitch-animation
 cargo build --release
 cp target/release/stitch-animation ~/bin
@@ -27,7 +27,7 @@ cp target/release/stitch-animation ~/bin
 
 `stitch-animation path/video name.mkv`
 
-creates image sequences in the current working directory matching the pattern  `./video name.seq/*.png`
+saves image sequences in the current working directory matching the pattern  `./video name.seq/*.png`
 
 
 
@@ -40,7 +40,7 @@ creates image sequences in the current working directory matching the pattern  `
 * can not be considered fully automated until it spits out decent composites with minimal artifacts
   
 
-## Future work
+## TODO
 
 * fast planar stitching (opencv? hugin?) 
   * remove foreground objects and logos (trimmed mean over multiple layers, gradient blending, smarter frame selection)
