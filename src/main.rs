@@ -163,16 +163,31 @@ struct PngOut {
     encoder: ffmpeg::codec::encoder::video::Encoder
 }
 
+use std::collections::VecDeque;
+
 struct Writer {
     frame_nr: usize,
     frames: std::collections::VecDeque<MVFrame>,
     out: Option<PngOut>,
-    output_path: PathBuf
+    output_path: PathBuf,
+    log: Option<std::io::BufWriter<std::fs::File>>
+}
+
+fn write_packet(out: &mut PngOut, mut packet: ffmpeg::packet::Packet) {
+    //let mut packet = self.packets.pop_back().unwrap();
+    //let mut out = self.out.as_mut().unwrap();
+    packet.set_stream(0);
+    //packet.set_pts(Some(mv_frame.idx as i64));
+    //packet.set_dts(Some(mv_frame.idx as i64));
+
+    out.octx.write_header().unwrap();
+    packet.write(&mut out.octx).unwrap();
+
 }
 
 impl Writer {
     fn new(p: PathBuf) -> Self {
-        Writer{frame_nr: 0, frames: std::collections::VecDeque::new(), out: None, output_path: p}
+        Writer{frame_nr: 0, frames: std::collections::VecDeque::new(), out: None, output_path: p, log: None}
     }
 
     fn add_frame(&mut self, mut frame: MVFrame) {
@@ -183,15 +198,18 @@ impl Writer {
             self.frames.pop_back();
         }
 
-        if self.pan_end() {
-            self.write();
+        if self.out.is_some() && self.pan_end() {
+            while self.frames.len() > 1 {
+                self.encode();
+            }
             self.close()
         }
+
         self.open_batch();
 
         if self.out.is_some() {
             while self.frames.len() > 1 {
-                self.write();
+                self.encode();
             }
         }
 
@@ -225,11 +243,24 @@ impl Writer {
     }
 
     fn close(&mut self) {
-        if let Some(_) = self.out {
+        if let Some(ref mut out) = self.out {
+
+            //if self.cur_packet.is_some() {
+                loop {
+                    let mut packet = ffmpeg::codec::packet::packet::Packet::empty(); //std::mem::replace(&mut self.cur_packet, None).unwrap();
+                    match out.encoder.flush(&mut packet) {
+                        Ok(true) => write_packet(out, packet),
+                        _ => break
+                    }
+                }
+                out.octx.write_trailer().unwrap();
+            //}
+
             assert!(self.frames.len() >= 1);
-            //println!("pan end: {:?}", self.frames[0]);
-            self.out = None
+            writeln!(self.log.as_mut().unwrap(), "pan end: {:?}", self.frames[0]).unwrap();
         }
+        self.out = None;
+        self.log = None;
 
     }
 
@@ -262,12 +293,15 @@ impl Writer {
         self.frames.truncate(len);
     }
 
-    fn write(&mut self) {
+    fn encode(&mut self) {
         if let Some(ref mut out) = self.out {
+
             let mut packet = ffmpeg::codec::packet::packet::Packet::empty();
+
+
             let mv_frame = self.frames.pop_back().unwrap();
 
-            //println!("{:?}", mv_frame);
+            writeln!(self.log.as_mut().unwrap(),"{:?}", mv_frame).unwrap();
 
             let frame_in = mv_frame.frame;
             let mut frame_out = ffmpeg::frame::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, frame_in.width(),frame_in.height());
@@ -275,25 +309,21 @@ impl Writer {
             conv.run(&frame_in, &mut frame_out).unwrap();
 
             match out.encoder.encode(&frame_out, &mut packet) {
-                Ok(true) => {}
+                Ok(true) => {
+                    write_packet(out, packet)
+                }
                 Ok(false) => {
-                    out.encoder.flush(&mut packet).unwrap();
+                    //self.cur_packet = Some(packet)
                 }
                 Err(e) => {
                     println!("{:?}", e);
                     return;
                 }
             }
-
-            packet.set_stream(0);
-            packet.set_pts(Some(mv_frame.idx as i64));
-            packet.set_dts(Some(mv_frame.idx as i64));
-
-            out.octx.write_header().unwrap();
-            packet.write(&mut out.octx).unwrap();
-            //out.octx.write_trailer().unwrap();
         }
     }
+
+
 
     fn open_batch(&mut self) {
         if self.out.is_some() {
@@ -308,7 +338,6 @@ impl Writer {
         let start_frame = self.frames[self.frames.len()-1].idx;
 
 
-        let name = format!("out{}+%03d.png", start_frame);
 
         let stem = self.output_path.file_stem().unwrap();
         let mut dir = PathBuf::from(".");
@@ -318,7 +347,11 @@ impl Writer {
 
         // /foo/bar/video.mkv -> video -> ./video.seq/outXXXX+001.png
 
-        let p = dir.join(name);
+        let logname = dir.join(format!("out{:06}.log", start_frame));
+        self.log = Some(std::io::BufWriter::new(std::fs::OpenOptions::new().create(true).write(true).open(logname).unwrap()));
+
+        let image2format = format!("out{:06}+%03d.png", start_frame);
+        let p = dir.join(image2format);
 
         let mut octx = unsafe {
             let mut ps     = std::ptr::null_mut();
@@ -341,12 +374,12 @@ impl Writer {
         let mut encoder = {
             let mut output = octx.add_stream(codec).unwrap();
             output.set_time_base((24, 1000));
-            output.codec().set_threading(threading::Config{kind: threading::Type::Slice, count: 0, safe: true});
+            output.codec().set_threading(threading::Config{kind: threading::Type::Frame, count: 0, safe: true});
             output.codec().encoder()
         };
 
         encoder.set_time_base((24, 1000));
-        encoder.set_threading(threading::Config{kind: threading::Type::Slice, count: 0, safe: true});
+        encoder.set_threading(threading::Config{kind: threading::Type::Frame, count: 0, safe: true});
 
 
         let mut encoder = encoder.video().unwrap();
@@ -402,7 +435,7 @@ fn main() {
             use std::thread;
             use std::sync::mpsc::sync_channel;
 
-            let (tx, rx) = sync_channel(120);
+            let (tx, rx) = sync_channel(40);
 
             let p = input.to_owned();
 
