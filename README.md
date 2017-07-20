@@ -1,12 +1,12 @@
 # stitch-animation
 
-Linear panning detection and scene extraction using motion vectors provided by video codecs.
+Linear panning detection, scene extraction and image compositing using motion vectors provided by video codecs.
 
-For the moment the tool only extracts image sequences and does not align or blend them.
-Microsoft ICE, Gimp, Photoshop or similar are recommended to merge them.
+Supports multi-threading, depending on CPU capacity, video resolution and passed arguments
+it should run 2-10x faster than normal playback speed.
 
-The extraction is multi-threaded, depending on CPU performance and video resolution,
-it should run 2-10x faster than realtime. 
+For the moment the goal is throughput, quality of the composites comes second.
+I.e. manual work is likely to outperform this tool on individual scenes.
 
 ![video to frame sequence to composite](doc/video,%20frames,%20composite.png)
 
@@ -15,7 +15,10 @@ it should run 2-10x faster than realtime.
 *Note:* The ffmpeg and ffmpeg-sys rust crates are currently being updated and require current FFmpeg libraries.
 Building works out of the box on Arch Linux. Ubuntu's FFmpeg packages on the other hand are too old. 
 
-*runtime:* ffmpeg >= 3.2 or libav* equivalents
+*runtime:*
+
+* ffmpeg >= 3.2 or libav* equivalents
+* x86-64 CPU, motion detection loops are implemented using x86-specific SIMD instructions 
   
 *build time:*
 
@@ -32,36 +35,59 @@ and [linux build script](https://github.com/meh/rust-ffmpeg-sys/blob/master/.tra
 ```sh
 git clone --recursive https://github.com/the8472/stitch-animation.git
 cd stitch-animation
-cargo build --release
-cp target/release/stitch-animation ~/bin
-## alternative, depending on your $PATH
-# cargo install 
+cargo install 
 ```
 
 ## run
 
 `stitch-animation path/video-name.mkv`
 
-saves image sequences in the current working directory matching the pattern  `./video-name.seq/*.png`
+saves composites for found sequences in the current working directory matching the pattern  `./video-name.seq/*.png`
 
+```
+$ stitch-animation --help
+animation linear panning detection, scene extraction and stitching for videos 0.1.1
 
+USAGE:
+    stitch-animation [FLAGS] [OPTIONS] <inputs>...
+
+FLAGS:
+    -h, --help        Prints help information
+        --nostitch    do not create composite images
+    -V, --version     Prints version information
+
+OPTIONS:
+    -n <N>                   process at most N frames, after seeking
+    -p, --pictures <pics>    save individual frames [default: null]  [values: png, jpg]
+    -s <seek_to>             seek to frame number [currently inaccurate, specify a lower number than the desired actual frame]
+
+ARGS:
+    <inputs>...    videos files to process. specify '-' to read a newline-separated list from stdin.
+                   Example: find /media/videos -type f -name '*.mkv' | stitch-animation -
+```
 
 ## Current limitations
 
+* x86 only
 * only codecs for which libavcodec exports motion vectors are supported (e.g. the mpeg family)
-* I-frames in the middle of a pan can lead to a split pan or premature end of sequence
-* any kind of non-linear motion is not actively supported. they just may happen to work anyway. this includes
-  zoom, rotations, stops during the pan, sharp turns in the path taken by the camera.
-* can not be considered fully automated until it spits out decent composites with minimal artifacts
+* any kind of non-linear motion is not actively supported. they just may happen to work anyway.
+  this includes zoom, rotations, perspective distortions.
+  Long stops during a pan may also lead to disjoint sequences.
+  Use image extraction and an external compositor such as Microsoft's ICE to handle these cases
+* letterbox black bars can confuse the motion detector
+
+
   
 
-## TODO
+## TODO/Ideas
 
-* fast planar stitching (opencv? hugin?) 
+* improve compositing
   * remove foreground objects and logos (trimmed mean over multiple layers, gradient blending, smarter frame selection)
-* jpg output
-* estimate affine transforms for global motion instead of dominant vector
-* detect still frames in the middle of pans by diffing random samples
+  * analyze the areas moving into and out of a frame, i.e. how clean the pan is
+* zoom and rotation support
+  * infer affine transforms from vectors? or search separately for those operations?
 * use ffmpeg's `mestimate` filter to construct vectors if none are present (would help with I-frames too)
-* skip some frames containing redundant information on perfectly horizontal or vertical pans to reduce encoding load
- 
+* performance improvements
+  * skip some frames containing redundant information on perfectly horizontal or vertical pans to reduce encoding load
+* skip ranges if they're already decoded on disk
+
