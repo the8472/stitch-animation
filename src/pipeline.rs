@@ -259,16 +259,6 @@ fn write_packet(out: &mut ImageOut, mut packet: ffmpeg::packet::Packet) {
 
 impl Drop for PanFinder {
     fn drop(&mut self) {
-        if !self.out.is_some() {
-            return;
-        }
-
-        /*
-        while self.frames.len() > 0 {
-            let out = self.out.as_mut().unwrap();
-            out.encode(self.stitch, self.format);
-            out.next_frame(self.frames.pop_back().unwrap());
-        }*/
         self.finish_batch();
         self.await();
     }
