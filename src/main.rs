@@ -13,6 +13,7 @@ extern crate euclid;
 extern crate itertools;
 extern crate float_ord;
 
+mod opencv;
 mod stitchers;
 mod motion;
 mod pipeline;

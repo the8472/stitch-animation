@@ -1,4 +1,5 @@
 use std;
+use opencv;
 use ffmpeg;
 use ffmpeg::frame::Video;
 use ffmpeg::codec::threading;
@@ -365,6 +366,20 @@ impl PanFinder {
                     }
                 }
                 out.octx.write_trailer().unwrap();
+            }
+
+
+            if self.stitch {
+                let dir = self.output_path();
+                let outfile = dir.join(format!("{:06}_stitched.png", out.start_frame));
+
+                let mut files = vec![];
+                for i in 0..out.nr_frames {
+                    files.push(dir.join(format!("{:06}+{:03}.{}", out.start_frame, i+1, self.format.extension())));
+                }
+
+
+                opencv::stitch(files, outfile);
             }
 
             if self.frames.len() > 0 {

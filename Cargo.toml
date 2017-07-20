@@ -2,6 +2,9 @@
 name = "stitch-animation"
 version = "0.1.1"
 authors = ["The8472 <git@infinite-source.de>"]
+build = "build.rs"
+links = "opencv"
+
 
 
 [profile.release]
