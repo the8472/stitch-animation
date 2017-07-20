@@ -3,7 +3,11 @@ use ffmpeg::frame::Video;
 use ffmpeg::util::format::pixel::Pixel;
 use std::collections::HashSet;
 use float_ord::FloatOrd;
-
+use simd::u8x16;
+// TODO: generic implementation
+use simd::x86::sse2::Sse2U8x16;
+use simd::x86::ssse3::Ssse3U8x16;
+use std::cmp::{min, max};
 
 
 #[derive(Copy, Clone, PartialEq)]
@@ -108,6 +112,40 @@ pub fn search(a: &Video, b: &Video, hints: Vec<(isize, isize)>) -> Estimate {
     best_match
 }
 
+
+// YUV420P
+macro_rules! sad8 {
+    ($a:expr, $b:expr, $offset_a:expr, $offset_b:expr, $stride:expr, $i:expr ) => {
+        {
+            let a = u8x16::load($a, $offset_a + $i * $stride);
+            let b = u8x16::load($b, $offset_b + $i * $stride);
+            a.sad(b)
+        }
+    };
+}
+
+
+// YUV420P10LE
+// little-endian 2bytes per value
+// 1 byte integer + 1byte fractional value,
+// just mask away the fractional part for the SAD calculation
+const UPPER_MASK : u8x16 = u8x16::new(0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF, 0,0xFF, 0,0xFF, 0);
+const MOVE_UP : u8x16    = u8x16::new(0x80,0,0x80,2,0x80,4,0x80,6,0x80,8,0x80,10,0x80,12,0x80,14);
+
+macro_rules! sad16 {
+    ($a:expr, $b:expr, $offset_a:expr, $offset_b:expr, $stride:expr, $i:expr ) => {
+        {
+            let a1 = u8x16::load($a, $offset_a + $i * $stride) & UPPER_MASK;
+            let a2 = u8x16::load($a, $offset_a + $i * $stride + 16).shuffle_bytes(MOVE_UP);
+            let a = a1 | a2;
+            let b1 = u8x16::load($b, $offset_b + $i * $stride) & UPPER_MASK;
+            let b2 = u8x16::load($b, $offset_b + $i * $stride + 16).shuffle_bytes(MOVE_UP);
+            let b = b1 | b2;
+            a.sad(b)
+        }
+    };
+}
+
 pub fn error_sum(a: &Video, b: &Video, offset_x: isize, offset_y: isize) -> Estimate {
     let luma_a = a.data(0);
     let luma_b = b.data(0);
@@ -122,52 +160,33 @@ pub fn error_sum(a: &Video, b: &Video, offset_x: isize, offset_y: isize) -> Esti
     let intersection = intersection.inflate(-16,-16);
 
     // TODO: conditional compilation
-    use simd::u8x16;
-    use simd::x86::sse2::u64x2;
-    use simd::x86::sse2::Sse2U8x16;
-    //use simd::x86::ssse3::Ssse3U8x16;
-    use std::cmp::{min, max};
+
 
     let mut accumulator : u64 = 0;
     let mut area_sum : u64 = 0;
 
     match a.format() {
         Pixel::YUV420P => {
-            //for row in (intersection.min_y()..intersection.max_y()) {
+            let stride = frame_w as usize;
             for row in (intersection.min_y()..intersection.max_y() - 7).step_by(8) {
                 let row_a = (row - dims_a.min_y()) * frame_w;
                 let row_b = (row - dims_b.min_y()) * frame_w;
 
+
                 for col in (intersection.min_x()..intersection.max_x() - 15).step_by(16) {
-                    let stride_a = (row_a + col - dims_a.min_x()) as usize;
-                    let stride_b = (row_b + col - dims_b.min_x()) as usize;
+                    let off_a = (row_a + col - dims_a.min_x()) as usize;
+                    let off_b = (row_b + col - dims_b.min_x()) as usize;
 
-                    let a = u8x16::load(luma_a, stride_a + 0 * frame_w as usize);
-                    let b = u8x16::load(luma_b, stride_b + 0 * frame_w as usize);
-                    let sad0 = a.sad(b);
-                    let a = u8x16::load(luma_a, stride_a + 1 * frame_w as usize);
-                    let b = u8x16::load(luma_b, stride_b + 1 * frame_w as usize);
-                    let sad1 = a.sad(b);
-                    let a = u8x16::load(luma_a, stride_a + 2 * frame_w as usize);
-                    let b = u8x16::load(luma_b, stride_b + 2 * frame_w as usize);
-                    let sad2 = a.sad(b);
-                    let a = u8x16::load(luma_a, stride_a + 3 * frame_w as usize);
-                    let b = u8x16::load(luma_b, stride_b + 3 * frame_w as usize);
-                    let sad3 = a.sad(b);
-                    let a = u8x16::load(luma_a, stride_a + 4 * frame_w as usize);
-                    let b = u8x16::load(luma_b, stride_b + 4 * frame_w as usize);
-                    let sad4 = a.sad(b);
-                    let a = u8x16::load(luma_a, stride_a + 5 * frame_w as usize);
-                    let b = u8x16::load(luma_b, stride_b + 5 * frame_w as usize);
-                    let sad5 = a.sad(b);
-                    let a = u8x16::load(luma_a, stride_a + 6 * frame_w as usize);
-                    let b = u8x16::load(luma_b, stride_b + 6 * frame_w as usize);
-                    let sad6 = a.sad(b);
-                    let a = u8x16::load(luma_a, stride_a + 7 * frame_w as usize);
-                    let b = u8x16::load(luma_b, stride_b + 7 * frame_w as usize);
-                    let sad7 = a.sad(b);
+                    let sad0 = sad8!(luma_a,luma_b,off_a, off_b, stride, 0);
+                    let sad1 = sad8!(luma_a,luma_b,off_a, off_b, stride, 1);
+                    let sad2 = sad8!(luma_a,luma_b,off_a, off_b, stride, 2);
+                    let sad3 = sad8!(luma_a,luma_b,off_a, off_b, stride, 3);
+                    let sad4 = sad8!(luma_a,luma_b,off_a, off_b, stride, 4);
+                    let sad5 = sad8!(luma_a,luma_b,off_a, off_b, stride, 5);
+                    let sad6 = sad8!(luma_a,luma_b,off_a, off_b, stride, 6);
+                    let sad7 = sad8!(luma_a,luma_b,off_a, off_b, stride, 7);
 
-                    let sad = sad1 + sad2 + sad3 + sad4 + sad5 + sad6 + sad7;
+                    let sad = sad0 + sad1 + sad2 + sad3 + sad4 + sad5 + sad6 + sad7;
 
                     let a = sad.extract(0);
                     let b = sad.extract(1);
@@ -177,33 +196,31 @@ pub fn error_sum(a: &Video, b: &Video, offset_x: isize, offset_y: isize) -> Esti
             }
         }
         Pixel::YUV420P10LE => {
-            // little-endian 2bytes per value
-            // 1 byte integer + 1byte fractional value,
-            // just mask away the fraction for the SAD calculation
-            const UPPER_MASK : u8x16 = u8x16::new(0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF,0,0xFF, 0);
+            let frame_stride = (frame_w * 2) as usize;
 
-            for row in intersection.min_y() .. intersection.max_y() {
-                // TODO: eliminate multiplication
-                let row_a = (row - dims_a.min_y()) * frame_w * 2;
-                let row_b = (row - dims_b.min_y()) * frame_w * 2;
+            for row in (intersection.min_y() .. intersection.max_y()-7).step_by(8) {
+                let row_a = (row - dims_a.min_y()) * frame_stride as isize;
+                let row_b = (row - dims_b.min_y()) * frame_stride as isize;
 
                 for col in (intersection.min_x() .. intersection.max_x() - 15).step_by(16) {
-                    let stride_a = row_a + col * 2 - dims_a.min_x() * 2;
-                    let stride_b = row_b + col * 2 - dims_b.min_x() * 2;
-
-                    let a1 = u8x16::load(luma_a, stride_a as usize) & UPPER_MASK;
-                    let a2 = u8x16::load(luma_a, (stride_a + 16) as usize) & UPPER_MASK;
-                    let b1 = u8x16::load(luma_b, stride_b as usize) & UPPER_MASK;
-                    let b2 = u8x16::load(luma_b, (stride_b + 16) as usize) & UPPER_MASK;
-
-                    let (sad1,sad2) = (a1.sad(b1), a2.sad(b2));
-                    let (s1,s2) = (sad1.extract(0), sad1.extract(1));
-                    let (s3,s4) = (sad2.extract(0), sad2.extract(1));
-
-                    accumulator +=  s1 + s2 + s3 + s4;
-                    area_sum += min(4, s1) + min(4, s2) + min(4, s3) + min(4, s4);
+                    let off_a = (row_a + col * 2 - dims_a.min_x() * 2) as usize;
+                    let off_b = (row_b + col * 2 - dims_b.min_x() * 2) as usize;
 
 
+                    let sad0 = sad16!(luma_a,luma_b,off_a, off_b, frame_stride, 0);
+                    let sad1 = sad16!(luma_a,luma_b,off_a, off_b, frame_stride, 1);
+                    let sad2 = sad16!(luma_a,luma_b,off_a, off_b, frame_stride, 2);
+                    let sad3 = sad16!(luma_a,luma_b,off_a, off_b, frame_stride, 3);
+                    let sad4 = sad16!(luma_a,luma_b,off_a, off_b, frame_stride, 4);
+                    let sad5 = sad16!(luma_a,luma_b,off_a, off_b, frame_stride, 5);
+                    let sad6 = sad16!(luma_a,luma_b,off_a, off_b, frame_stride, 6);
+                    let sad7 = sad16!(luma_a,luma_b,off_a, off_b, frame_stride, 7);
+
+                    let sad = sad0 + sad1 + sad2 + sad3 + sad4 + sad5 + sad6 + sad7;
+                    let a = sad.extract(0);
+                    let b = sad.extract(1);
+                    accumulator += a + b;
+                    area_sum += min(8*8, a) + min(8*8, b);
                 }
             }
         },

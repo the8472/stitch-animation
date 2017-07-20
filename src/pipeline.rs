@@ -349,8 +349,6 @@ impl PanFinder {
     fn finish_batch(&mut self) {
         let out = ::std::mem::replace(&mut self.out, None);
 
-        self.await();
-
         if let Some(mut out) = out {
 
             // last frame if there is one
@@ -379,6 +377,7 @@ impl PanFinder {
             if self.stitch {
                 writeln!(out.log, "stitch\n{:?}", out.stitcher);
 
+                self.await();
                 self.pending_async = Some(out.write_linear_stitch());
             }
 
