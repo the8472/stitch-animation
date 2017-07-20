@@ -12,13 +12,13 @@ I.e. manual work is likely to outperform this tool on individual scenes.
 
 ## Dependencies
 
-*Note:* The ffmpeg and ffmpeg-sys rust crates are currently being updated and require current FFmpeg libraries.
+*Note:* The ffmpeg and ffmpeg-sys rust crates are currently being updated and require up-to-date FFmpeg libraries.
 Building works out of the box on Arch Linux. Ubuntu's FFmpeg packages on the other hand are too old. 
 
 *runtime:*
 
 * ffmpeg >= 3.2 or libav* equivalents
-* x86-64 CPU, motion detection loops are implemented using x86-specific SIMD instructions 
+* x86-64 CPU with SSSE3 instruction set. motion detection loops are implemented using x86-specific SIMD instructions 
   
 *build time:*
 
@@ -30,12 +30,15 @@ Building works out of the box on Arch Linux. Ubuntu's FFmpeg packages on the oth
 For build problems with ffmpeg-sys take a look at their [travis configuration](https://github.com/meh/rust-ffmpeg-sys/blob/master/.travis.yml)
 and [linux build script](https://github.com/meh/rust-ffmpeg-sys/blob/master/.travis/install_linux.sh)
  
-## Build
+## Build & Install
 
 ```sh
 git clone --recursive https://github.com/the8472/stitch-animation.git
 cd stitch-animation
-cargo install 
+# minimum CPU requirements
+RUSTFLAGS="-C target-feature=+sse2,+ssse3" cargo install
+# optimized for current system
+RUSTFLAGS="-C target-cpu=native" cargo install
 ```
 
 ## run
@@ -73,7 +76,7 @@ ARGS:
 * any kind of non-linear motion is not actively supported. they just may happen to work anyway.
   this includes zoom, rotations, perspective distortions.
   Long stops during a pan may also lead to disjoint sequences.
-  Use image extraction and an external compositor such as Microsoft's ICE to handle these cases
+  Use image extraction option and an external compositor such as Microsoft's ICE to handle these cases
 * letterbox black bars can confuse the motion detector
 
 
