@@ -92,10 +92,9 @@ impl MVPrefilter {
             // I-frames lack forward predictions, try to do a simple global motion search to
             // fill the blanks
             if p1.frame_type == AV_PICTURE_TYPE_I {
-                let mut hints = p0.frame.most_common_vectors();
-                hints.extend(p2.frame.most_common_vectors());
+                let hint = p0.frame.most_common_vectors();
 
-                let est = search::search(&p1.frame, &p2.frame, hints);
+                let est = search::search(&p1.frame, &p2.frame, hint);
                 //println!("I-frame {} err{} area{} x{} y{}", p1.idx, error, area, x, y);
 
                 p1.add_full_compare(p2.idx, est);
@@ -133,12 +132,12 @@ impl MVPrefilter {
     }
 
     pub(crate) fn drain(mut self) -> impl Iterator<Item=MVFrame> {
-        if self.pre_queue.len() >= 3 {
-            let p = &mut self.pre_queue[2];
+        if self.pre_queue.len() > 0 {
+            let p = &mut self.pre_queue[0];
             p.mv_info.populate(None, &p.frame, None);
         }
 
-        self.pre_queue.into_iter()
+        self.pre_queue.into_iter().rev()
     }
 }
 
@@ -287,16 +286,16 @@ impl PanFinder {
 
         if self.frames.len() > MAX_QUEUE {
             self.frames.pop_back();
+            assert!(self.out.is_none(), "queue overflow only allowed when no batch present");
         }
 
 
-        let mut first_frame = self.frames[self.frames.len()-1].idx as usize;
+        let mut oldest_queued_idx = self.frames[self.frames.len()-1].idx as usize;
 
         if let Some(out) = self.out.as_ref() {
-            let last = out.last_frame_idx as usize;
-            if last == first_frame - 1 {
-                first_frame = last;
-            }
+            let last_in_encoder = out.last_frame_idx as usize;
+            assert!(oldest_queued_idx - 1 == last_in_encoder, "queue discontinuity. queue: {:?}\nencoder:{}", self.frames, last_in_encoder);
+            oldest_queued_idx = last_in_encoder;
         }
 
 
@@ -305,7 +304,7 @@ impl PanFinder {
                 self.finish_batch();
             }
             Run::Run{motion_frames, oldest_frame} => {
-                if oldest_frame != first_frame {
+                if oldest_frame != oldest_queued_idx {
                     self.finish_batch();
                 }
             }
@@ -381,7 +380,12 @@ impl PanFinder {
 
             match run {
                 Run::NeedsScan(i) => {
-                    let scan_idx = self.frames.iter().enumerate().find(|&(_,f)| f.idx == i).unwrap().0;
+                    let scan_idx = match self.frames.iter().enumerate().find(|&(_, f)| f.idx == i) {
+                        Some(tuple) => tuple.0,
+                        None => {
+                            panic!("should not happen. expected to find:{} available:{:?}", i, self.frames);
+                        }
+                    };
 
                     let (a,b) = unsafe {
                         let frames = &mut self.frames;
@@ -399,9 +403,8 @@ impl PanFinder {
                         _ => return Run::Still
                     };
 
-                    let mut hints = a.frame.most_common_vectors();
-                    hints.extend(b.frame.most_common_vectors());
-                    let estimate = search::search(&a.frame, &b.frame, hints);
+                    let hint = a.frame.most_common_vectors().or_else(|| b.frame.most_common_vectors());
+                    let estimate = search::search(&a.frame, &b.frame, hint);
 
                     a.add_full_compare(b.idx, estimate);
                     b.add_full_compare(a.idx, estimate.reverse());

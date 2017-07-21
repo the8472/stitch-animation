@@ -6,19 +6,19 @@ authors = ["The8472 <git@infinite-source.de>"]
 
 [profile.release]
 lto = true
-codegen-units = 4
 debug = true
 panic = 'abort'
 
 
 [profile.dev]
+opt-level = 1
 codegen-units = 4
-panic = 'abort'
 
 [dependencies]
 #ffmpeg = {version = "0.2.0-alpha.2", git = "https://github.com/retrry/rust-ffmpeg.git", rev = "db95408164d278809b12e2e77ed90025ed6431ec" }
 ffmpeg = {version = "0.2.0-alpha.2", git = "https://github.com/meh/rust-ffmpeg.git", rev = "8cf47c7ec6356a1d0a9cd53ffa67c424d2e800c7" }
 #ffmpeg = {version = "0.2.0-alpha.2", git = "https://github.com/meh/rust-ffmpeg.git" }
+stdsimd = {version = "0.0.1", git = "https://github.com/BurntSushi/stdsimd.git", rev = "ff6021b72e8cc1e7db942847d99278fe0056c245"}
 libc = "0.2.0"
 clap = "2.25.0"
 rand = "0.3"
@@ -27,7 +27,7 @@ euclid = "0.15.1"
 rayon = "0.8.2"
 itertools = "0.6.1"
 float-ord = "0.1.2"
-
+atomic = {version = "0.3.4", features = ["nightly"]}
 
 [build-dependencies]
 gcc = "0.3.51"
@@ -35,6 +35,8 @@ gcc = "0.3.51"
 [replace]
 #"ffmpeg-sys:3.3.2" = {git = "https://github.com/meh/rust-ffmpeg-sys.git" }
 "ffmpeg-sys:3.2.1" = {path = "./ffmpeg-sys"}
+"simd:0.2.0" = {path = "../simd"}
+
 
 [features]
 doc = ["simd/doc"]

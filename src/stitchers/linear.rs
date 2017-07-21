@@ -1,10 +1,8 @@
-use euclid::{rect,vec2, Rect, TypedSize2D, UnknownUnit};
+use euclid::{rect,Rect, TypedSize2D, UnknownUnit};
 use ffmpeg::frame::Video;
 use ffmpeg::util::format::pixel::Pixel;
-use std::collections::HashSet;
 use std::fmt;
 use motion::search::{self, Estimate};
-use itertools::Itertools;
 
 // TODO:
 // [ ] real diamond search with image pyramid
@@ -27,9 +25,9 @@ struct AlignedFrame {
 impl AlignedFrame {
 
 
-    fn align_to(&mut self, other: &AlignedFrame) {
+    fn align_to(&mut self, other: &AlignedFrame, hint: Option<(isize,isize)> ) {
 
-        let estimate = search::search(&self.avframe, &other.avframe, vec![]);
+        let estimate = search::search(&self.avframe, &other.avframe, hint);
 
         self.offset_x = other.offset_x + estimate.x;
         self.offset_y = other.offset_y + estimate.y;
@@ -64,10 +62,8 @@ impl LinStitcher {
             .chain(self.frames.iter().take(1))
             .next() {
             use motion::vectors::ToMotionVectors;
-            let mut hints = frame.avframe.most_common_vectors();
-            hints.extend(new_frame.avframe.most_common_vectors());
-            hints.extend(self.frames.iter().filter_map(|f| if f.estimate.x != 0 || f.estimate.y != 0 {Some((f.estimate.x,f.estimate.y))} else {None} ).take(10));
-            new_frame.align_to(&frame);
+            let hint = self.frames.iter().rev().map(|f| (f.estimate.x,f.estimate.y)).next();
+            new_frame.align_to(&frame, hint);
         }
 
         self.frames.push(new_frame);
@@ -88,15 +84,17 @@ impl LinStitcher {
 
         let frame = &self.frames[0].avframe;
 
+        let slice_target_height = canvas_dims.size.height as usize / ::rayon::current_num_threads();
+        let slice_chunk_size = slice_target_height * canvas_stride;
+
         let mut conv = converter((frame.width(),frame.height()), frame.format(), Pixel::RGBA).unwrap();
         let mut intermediate = Video::new(Pixel::RGBA, frame.width(), frame.height());
+
 
         {
             let data_out : &mut[(u8,u8,u8,u8)] = canvas.plane_mut(0);
 
-            for fr in self.frames.iter().coalesce(|a,b| {
-                if a.offset_x == b.offset_x && a.offset_y == b.offset_y { Ok(a) } else { Err((a,b)) }
-            }) {
+            for (_, fr) in self.frames.iter().enumerate().filter(|&(i,f)| i == 0 || f.estimate.x != 0 || f.estimate.y != 0) {
                 conv.run(&fr.avframe, &mut intermediate).unwrap();
 
                 let data_in : &[(u8,u8,u8,u8)] = intermediate.plane(0);
@@ -107,37 +105,39 @@ impl LinStitcher {
                 let w = intermediate.width();
                 let input_stride = intermediate.stride(0) as u32 / 4;
 
-                let r = rect::<_, UnknownUnit>(fr.offset_x,fr.offset_y,w as isize,h as isize);
+                const SEAM_WIDTH : u32 = 8;
+
+                let idx_out = (fr.offset_x - canvas_dims.min_x()) + (fr.offset_y - canvas_dims.min_y()) * canvas_stride as isize;
 
                 for y in 0 .. h {
-                    let row_out = (y as isize + fr.offset_y - canvas_dims.min_y()) * canvas_stride as isize;
-                    let row_in = y * input_stride;
+                    let idx_out = idx_out + y as isize * canvas_stride as isize;
+                    let idx_in = y * input_stride;
+
+                    use std::cmp::min;
+
+                    let vertical_edge_dist = min(y, h - y - 1);
 
                     for x in 0 .. w {
-                        let x_out = (row_out + x as isize + (fr.offset_x - canvas_dims.min_x())) as usize;
-                        let x_in = (row_in + x) as usize;
+                        let idx_out = (idx_out + x as isize) as usize;
+                        let idx_in = (idx_in + x) as usize;
 
-                        use std::cmp::min;
-
-                        const SEAM_WIDTH : u32 = 8;
-
-                        let edge_dist = min(min(x, w - x - 1), min(y, h - y - 1));
+                        let edge_dist = min(min(x, w - x - 1), vertical_edge_dist);
                         if edge_dist < SEAM_WIDTH  {
-                            let old = data_out[x_out];
+                            let old = data_out[idx_out];
                             // old is not opaque. just paint over it.
                             if old.3 < 255 {
-                                data_out[x_out] = data_in[x_in];
+                                data_out[idx_out] = data_in[idx_in];
                             } else {
                                 // alpha-blend
                                 let alpha = edge_dist * 255 / SEAM_WIDTH;
-                                data_out[x_out].0 = ((data_in[x_in].0 as u32 * alpha + old.0 as u32 * (255 - alpha)) / 255) as u8;
-                                data_out[x_out].1 = ((data_in[x_in].1 as u32 * alpha + old.1 as u32 * (255 - alpha)) / 255) as u8;
-                                data_out[x_out].2 = ((data_in[x_in].2 as u32 * alpha + old.2 as u32 * (255 - alpha)) / 255) as u8;
-                                data_out[x_out].3 = 255;
+                                data_out[idx_out].0 = ((data_in[idx_in].0 as u32 * alpha + old.0 as u32 * (255 - alpha)) / 255) as u8;
+                                data_out[idx_out].1 = ((data_in[idx_in].1 as u32 * alpha + old.1 as u32 * (255 - alpha)) / 255) as u8;
+                                data_out[idx_out].2 = ((data_in[idx_in].2 as u32 * alpha + old.2 as u32 * (255 - alpha)) / 255) as u8;
+                                data_out[idx_out].3 = 255;
                             }
 
                         } else {
-                            data_out[x_out] = data_in[x_in];
+                            data_out[idx_out] = data_in[idx_in];
                         }
 
 

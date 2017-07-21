@@ -3,6 +3,7 @@
 #![feature(conservative_impl_trait)]
 #![feature(iterator_step_by)]
 #![feature(const_fn)]
+#![feature(cfg_target_feature)]
 
 extern crate ffmpeg;
 #[macro_use]
@@ -12,6 +13,8 @@ extern crate rayon;
 extern crate euclid;
 extern crate itertools;
 extern crate float_ord;
+extern crate atomic;
+extern crate stdsimd;
 
 mod stitchers;
 mod motion;
@@ -195,4 +198,7 @@ fn main() {
         }
         process_video(p, stitch, format, seek, max_frames);
     }
+
+    let counts = motion::search::COUNTS.load(atomic::Ordering::Relaxed);
+    println!("loops:{} points:{}", counts.0, counts.1);
 }

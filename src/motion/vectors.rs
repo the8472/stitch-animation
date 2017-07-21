@@ -14,23 +14,19 @@ use itertools::Itertools;
 pub(crate) trait ToMotionVectors {
     fn motion_vecs(&self) -> Option<&[AVMotionVector]>;
 
-    fn most_common_vectors(&self) -> Vec<(isize, isize)> {
+    fn most_common_vectors(&self) -> Option<(isize, isize)> {
         match self.motion_vecs() {
             Some(vecs) => {
                 let mut bins = HashMap::new();
-                for vec in vecs {
+                for vec in vecs.iter().filter(|vec| vec.source < 0) {
                     let mut xy = (vec.motion_x as isize / vec.motion_scale as isize, vec.motion_y as isize / vec.motion_scale as isize);
-                    if vec.source > 0 {
-                        xy.0 = -xy.0;
-                        xy.1 = -xy.1;
-                    }
-                    *bins.entry(xy).or_insert(0) += 1;
+                    *bins.entry(xy).or_insert(0) += vec.w as u32 * vec.h as u32;
                 }
 
                 let sorted = bins.into_iter().sorted_by(|a,b| a.cmp(b));
-                sorted.into_iter().rev().take(10).map(|(k,_)| k).collect()
+                sorted.into_iter().rev().map(|(k,_)| k).next()
             }
-            None => vec![]
+            None => None
         }
     }
 }
