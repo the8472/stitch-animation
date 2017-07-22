@@ -15,6 +15,8 @@ use motion::vectors::{MVInfo,ToMotionVectors, MVec};
 use motion::search::{self, Estimate};
 use euclid::rect;
 use std::thread;
+use oxipng;
+use std::collections::HashSet;
 
 
 
@@ -156,13 +158,15 @@ struct ImageOut {
 }
 
 impl ImageOut {
-    fn write_linear_stitch(self) -> thread::JoinHandle<()> {
+    fn write_linear_stitch(self, optimize: bool) -> thread::JoinHandle<()> {
         let ImageOut{stitcher, start_frame, dir, ..} = self;
 
         thread::spawn(move || {
             let frame = stitcher.merge();
 
-            let mut octx = ffmpeg::format::output(&dir.join(format!("{:06}_lin.png", start_frame))).unwrap();
+            let path = dir.join(format!("{:06}_lin.png", start_frame));
+
+            let mut octx = ffmpeg::format::output(&path).unwrap();
             let codec = ffmpeg::encoder::find_by_name("png").unwrap();
             let mut encoder = octx.add_stream(codec).unwrap().codec().encoder().video().unwrap();
             //output.set_time_base((24, 1000));
@@ -185,6 +189,17 @@ impl ImageOut {
             octx.write_header().unwrap();
             packet.write(&mut octx).unwrap();
             octx.write_trailer().unwrap();
+
+            let mut options = oxipng::Options::default();
+            let mut zm = HashSet::new();
+            zm.insert(9);
+            options.memory = zm;
+            let mut zf = HashSet::new();
+            zf.insert(5);
+            options.filter = zf;
+            options.verbosity = None;
+
+            oxipng::optimize(&path, &options);
         })
     }
 
@@ -241,7 +256,8 @@ pub(crate) struct PanFinder {
     output_path: PathBuf,
     stitch: bool,
     format: Format,
-    pending_async: Option<thread::JoinHandle<()>>
+    pending_async: Option<thread::JoinHandle<()>>,
+    optimize: bool
 }
 
 fn write_packet(out: &mut ImageOut, mut packet: ffmpeg::packet::Packet) {
@@ -272,8 +288,8 @@ enum Run {
 }
 
 impl PanFinder {
-    pub fn new(p: PathBuf, stitch: bool, f: Format) -> Self {
-        PanFinder {frame_nr: 0, frames: VecDeque::new(), stitch: stitch, out: None, output_path: p, format: f, pending_async: None}
+    pub fn new(output_path: PathBuf, stitch: bool, format: Format, optimize: bool) -> Self {
+        PanFinder {frame_nr: 0, frames: VecDeque::new(), stitch, out: None, output_path, format, pending_async: None, optimize}
     }
 
     pub fn add_frame(&mut self, frame: MVFrame) {
@@ -367,7 +383,7 @@ impl PanFinder {
                 writeln!(out.log, "stitch\n{:?}", out.stitcher);
 
                 self.await();
-                self.pending_async = Some(out.write_linear_stitch());
+                self.pending_async = Some(out.write_linear_stitch(self.optimize));
             }
 
 

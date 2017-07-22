@@ -15,6 +15,7 @@ extern crate itertools;
 extern crate float_ord;
 extern crate atomic;
 extern crate stdsimd;
+extern crate oxipng;
 
 mod stitchers;
 mod motion;
@@ -30,7 +31,7 @@ use pipeline::{PanFinder, Format, MVPrefilter, MVFrame};
 
 
 
-fn process_video(input: &Path, stitch: bool, format: Format, start: u32, max_frames: u32) {
+fn process_video(input: &Path, stitch: bool, format: Format, start: u32, max_frames: u32, optimize: bool) {
     match ffmpeg::format::input(&input) {
         Ok(mut ctx) => {
             let mut vdecoder;
@@ -98,7 +99,7 @@ fn process_video(input: &Path, stitch: bool, format: Format, start: u32, max_fra
             let p = input.to_owned();
 
             let thread = thread::spawn(move || {
-                let mut writer = PanFinder::new(p, stitch, format);
+                let mut writer = PanFinder::new(p, stitch, format, optimize);
 
                 while let Ok(Some(mv_frame)) = writer_in.recv() {
                     writer.add_frame(mv_frame);
@@ -164,6 +165,8 @@ fn main() {
         .version(crate_version!())
         .arg(Arg::with_name("nostitch").long("nostitch").required(false).takes_value(false)
             .help("do not create composite images"))
+        .arg(Arg::with_name("opt").long("opt").required(false).takes_value(false)
+            .help("optimize composite PNGs for size [slower]"))
         .arg(Arg::with_name("pics").short("p").long("pictures").required(false).takes_value(true)
             .possible_values(&["png","jpg"]).help("save individual frames"))
         .arg(Arg::with_name("inputs").index(1).multiple(true).required(true)
@@ -186,17 +189,18 @@ fn main() {
     let format = value_t!(matches, "pics", Format).unwrap_or(Format::NULL);
     let seek = value_t!(matches, "seek_to", u32).unwrap_or(0);
     let max_frames = value_t!(matches, "N", u32).unwrap_or(std::u32::MAX);
+    let optimize = matches.is_present("opt");
 
     for p in matches.values_of_os("inputs").unwrap().map(Path::new) {
         if p == Path::new("-") {
             let stdin = std::io::stdin();
             let reader = stdin.lock();
             for line in reader.lines() {
-                process_video(Path::new(&line.unwrap()), stitch, format, seek, max_frames);
+                process_video(Path::new(&line.unwrap()), stitch, format, seek, max_frames, optimize);
             }
             continue;
         }
-        process_video(p, stitch, format, seek, max_frames);
+        process_video(p, stitch, format, seek, max_frames, optimize);
     }
 
     let counts = motion::search::COUNTS.load(atomic::Ordering::Relaxed);
