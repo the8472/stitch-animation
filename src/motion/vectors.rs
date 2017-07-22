@@ -19,7 +19,7 @@ pub(crate) trait ToMotionVectors {
             Some(vecs) => {
                 let mut bins = HashMap::new();
                 for vec in vecs.iter().filter(|vec| vec.source < 0) {
-                    let mut xy = (vec.motion_x as isize / vec.motion_scale as isize, vec.motion_y as isize / vec.motion_scale as isize);
+                    let xy = (vec.motion_x as isize / vec.motion_scale as isize, vec.motion_y as isize / vec.motion_scale as isize);
                     *bins.entry(xy).or_insert(0) += vec.w as u32 * vec.h as u32;
                 }
 
@@ -42,6 +42,31 @@ impl ToMotionVectors for Video {
                 Some(unsafe { slice::from_raw_parts(ptr, len) })
             }
             None => None
+        }
+    }
+}
+
+#[derive(Clone,Copy)]
+pub(crate) enum Direction {
+    Forward,
+    Backward,
+    Bi,
+    Intra
+}
+
+impl Direction {
+    fn sum(self, mv: &MVec) -> usize {
+        match self {
+            Direction::Bi => {
+                mv.forward + mv.backward
+            }
+            Direction::Forward => {
+                mv.forward
+            }
+            Direction::Backward => {
+                mv.backward
+            }
+            _ => unimplemented!()
         }
     }
 }
@@ -82,7 +107,12 @@ impl MVec {
     pub fn cnt(&self) -> usize {
         self.forward + self.backward + self.intra
     }
+
+    pub fn angle(&self) -> i16 {
+        self.angle
+    }
 }
+
 
 impl Debug for MVec {
     fn fmt(&self, f: &mut Formatter) -> Result {
@@ -311,11 +341,11 @@ impl MVInfo {
         self.swarms.iter().map(|e| e.intra).sum::<usize>()
     }
 
-    pub fn forward_still_blocks(&self) -> usize {
-        self.swarms.iter().filter(|e| e.len == 0).map(|m| m.forward).sum::<usize>()
+    pub fn still_blocks(&self, dir: Direction) -> usize {
+        self.swarms.iter().filter(|e| e.len == 0).map(|m| dir.sum(m)).sum::<usize>()
     }
 
-    pub fn forward_dominant_angle(&self) -> (i16, usize) {
+    pub fn dominant_angle(&self, dir: Direction) -> (i16, usize) {
         let mut bins = HashMap::new();
 
         for mv in &self.swarms {
@@ -323,10 +353,10 @@ impl MVInfo {
                 continue;
             }
             let entry = bins.entry(mv.angle).or_insert(0);
-            (*entry) += mv.forward;
+            (*entry) += dir.sum(mv);
         }
 
-        match bins.iter().max_by_key(|&(k,v)| *v) {
+        match bins.iter().max_by_key(|&(_,v)| *v) {
             Some((angle, count)) => (*angle, *count),
             None => (0,0)
         }

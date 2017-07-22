@@ -28,7 +28,12 @@ impl AlignedFrame {
     fn align_to(&mut self, other: &AlignedFrame, hint: Option<(isize,isize)> ) {
 
         let estimate = search::search(&self.avframe, &other.avframe, hint);
+        self.offset_x = other.offset_x + estimate.x;
+        self.offset_y = other.offset_y + estimate.y;
+        self.estimate = estimate;
+    }
 
+    fn with_estimate(&mut self, other: &AlignedFrame, estimate: Estimate) {
         self.offset_x = other.offset_x + estimate.x;
         self.offset_y = other.offset_y + estimate.y;
         self.estimate = estimate;
@@ -51,7 +56,7 @@ impl LinStitcher {
         LinStitcher{frames: vec![]}
     }
 
-    pub fn add_frame(&mut self, frame: Video) {
+    pub fn add_frame(&mut self, frame: Video, motion: Option<Estimate>) {
         let area = frame.height() * frame.width();
         let mut new_frame = AlignedFrame{avframe: frame, offset_x: 0, offset_y: 0, estimate: Estimate::still(area)};
 
@@ -61,9 +66,15 @@ impl LinStitcher {
             .filter(|f| f.estimate.x != 0 || f.estimate.y != 0)
             .chain(self.frames.iter().take(1))
             .next() {
-            use motion::vectors::ToMotionVectors;
-            let hint = self.frames.iter().rev().map(|f| (f.estimate.x,f.estimate.y)).next();
-            new_frame.align_to(&frame, hint);
+            match motion {
+                Some(m) => {
+                    new_frame.with_estimate(&frame, m);
+                }
+                None => {
+                    let hint = self.frames.iter().rev().map(|f| (f.estimate.x,f.estimate.y)).next();
+                    new_frame.align_to(&frame, hint);
+                }
+            }
         }
 
         self.frames.push(new_frame);

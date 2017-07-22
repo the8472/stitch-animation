@@ -48,7 +48,7 @@ impl MVFrame {
 
     fn add_full_compare(&mut self, frame_idx: u32, est: Estimate) {
         if self.full_scans.insert(frame_idx, est) == None {
-            if est.error_fraction() < 5.0 && frame_idx == self.idx - 1 {
+            if est.error_fraction() < 5.0 && frame_idx < self.idx {
                 let w = self.frame.width() as isize;
                 let h = self.frame.height() as isize;
                 let Estimate{x,y,..} = est;
@@ -93,7 +93,7 @@ impl MVPrefilter {
 
             // I-frames lack forward predictions, try to do a simple global motion search to
             // fill the blanks
-            if p1.frame_type == AV_PICTURE_TYPE_I {
+            //if p1.frame_type == AV_PICTURE_TYPE_I {
                 let hint = p0.frame.most_common_vectors();
 
                 let est = search::search(&p1.frame, &p2.frame, hint);
@@ -101,7 +101,7 @@ impl MVPrefilter {
 
                 p1.add_full_compare(p2.idx, est);
                 p2.add_full_compare(p1.idx, est.reverse());
-            }
+            //}
 
             // P and I frames lack back-predictions, transplant
             let pristine = p1.mv_info.clone();
@@ -181,7 +181,7 @@ impl ImageOut {
             match encoder.encode(&frame, &mut packet) {
                 Ok(true) => {}
                 Ok(false) => {
-                    encoder.flush(&mut packet);
+                    encoder.flush(&mut packet).unwrap();
                 }
                 Err(e) => eprintln!("{:?}", e)
             }
@@ -190,23 +190,31 @@ impl ImageOut {
             packet.write(&mut octx).unwrap();
             octx.write_trailer().unwrap();
 
-            let mut options = oxipng::Options::default();
-            let mut zm = HashSet::new();
-            zm.insert(9);
-            options.memory = zm;
-            let mut zf = HashSet::new();
-            zf.insert(5);
-            options.filter = zf;
-            options.verbosity = None;
+            if optimize {
+                let mut options = oxipng::Options::default();
+                let mut zm = HashSet::new();
+                zm.insert(9);
+                options.memory = zm;
+                let mut zf = HashSet::new();
+                zf.insert(5);
+                options.filter = zf;
+                options.verbosity = None;
 
-            oxipng::optimize(&path, &options);
+                oxipng::optimize(&path, &options);
+            }
         })
     }
 
     fn next_frame(&mut self, frame: MVFrame) {
         assert!(self.next_frame.is_none());
         self.last_frame_idx = frame.idx;
-        self.stitcher.add_frame(frame.frame.clone());
+
+        let est = if frame.idx > 0 {
+            frame.full_compare(frame.idx - 1)
+        } else {
+            None
+        };
+        self.stitcher.add_frame(frame.frame.clone(), est);
         self.next_frame = Some(frame);
     }
 
@@ -274,7 +282,7 @@ fn write_packet(out: &mut ImageOut, mut packet: ffmpeg::packet::Packet) {
 
 impl Drop for PanFinder {
     fn drop(&mut self) {
-        self.finish_batch();
+        self.finish_batch(PanEnd::EndOfStream);
         self.await();
     }
 }
@@ -283,8 +291,22 @@ impl Drop for PanFinder {
 enum Run {
     Still,
     Scenechange,
-    Run {motion_frames: usize,oldest_frame: usize},
-    NeedsScan(u32)
+    Run {motion_frames: usize,oldest_frame: usize, end: RunEnd},
+}
+
+#[derive(Debug)]
+enum RunEnd {
+    DirectionChange,
+    OutOfFrames,
+    MismatchAfterStills
+}
+
+#[derive(Debug)]
+enum PanEnd {
+    Scenechange,
+    QueueSaturation,
+    RunDiscontinuity(Run),
+    EndOfStream
 }
 
 impl PanFinder {
@@ -315,33 +337,34 @@ impl PanFinder {
         }
 
 
-        match self.run_length2() {
+        let run = self.run_length();
+        match run {
             Run::Scenechange => {
-                self.finish_batch();
+                self.finish_batch(PanEnd::Scenechange);
             }
-            Run::Run{motion_frames, oldest_frame} => {
+            Run::Run{oldest_frame, ..} => {
                 if oldest_frame != oldest_queued_idx {
-                    self.finish_batch();
+                    self.finish_batch(PanEnd::RunDiscontinuity(run));
                 }
             }
             _ => {}
         }
 
         if self.frames.len() == MAX_QUEUE {
-            self.finish_batch();
+            self.finish_batch(PanEnd::QueueSaturation);
         }
 
 
-        self.try_open_batch();
+        if let run @ Run::Run{..} = self.run_length() {
+            self.try_open_batch(run);
 
-        if let (Run::Run{..}, Some(out)) = (self.run_length(), self.out.as_mut()) {
-            while self.frames.len() > 0 {
-                out.encode(self.stitch, self.format);
-                out.next_frame(self.frames.pop_back().unwrap());
+            if let Some(ref mut out) = self.out {
+                while self.frames.len() > 0 {
+                    out.encode(self.stitch, self.format);
+                    out.next_frame(self.frames.pop_back().unwrap());
+                }
             }
         }
-
-
     }
 
 
@@ -351,7 +374,7 @@ impl PanFinder {
         }
     }
 
-    fn finish_batch(&mut self) {
+    fn finish_batch(&mut self, reason: PanEnd) {
         let out = ::std::mem::replace(&mut self.out, None);
 
         if let Some(mut out) = out {
@@ -370,14 +393,17 @@ impl PanFinder {
                 out.octx.write_trailer().unwrap();
             }
 
+            writeln!(out.log, "{:?}", reason);
+
             if self.frames.len() > 0 {
                 for frame in self.frames.iter().rev() {
                     writeln!(out.log, "pan end: {:?}", frame);
                 }
-
             } else {
                 writeln!(out.log, "pan end, no more frames");
             }
+
+            assert!(out.last_frame_idx >= out.start_frame, "created an out without frame {} {}", out.last_frame_idx, out.start_frame);
 
             if self.stitch {
                 writeln!(out.log, "stitch\n{:?}", out.stitcher);
@@ -390,49 +416,20 @@ impl PanFinder {
         }
     }
 
-    fn run_length2(&mut self) -> Run {
-        loop {
-            let run = self.run_length();
-
-            match run {
-                Run::NeedsScan(i) => {
-                    let scan_idx = match self.frames.iter().enumerate().find(|&(_, f)| f.idx == i) {
-                        Some(tuple) => tuple.0,
-                        None => {
-                            panic!("should not happen. expected to find:{} available:{:?}", i, self.frames);
-                        }
-                    };
-
-                    let (a,b) = unsafe {
-                        let frames = &mut self.frames;
-                        (&mut *(&mut frames[scan_idx] as *mut MVFrame),
-                            if(frames.len() > scan_idx + 1) {
-                                Some(&mut *(&mut frames[scan_idx+1] as *mut MVFrame))
-                            }  else {
-                                None
-                            })
-                    };
-
-                    let b = match (b, self.out.as_mut().and_then(|out| out.next_frame.as_mut())) {
-                        (Some(b),_) => b,
-                        (None, Some(b)) => b,
-                        _ => return Run::Still
-                    };
-
-                    let hint = a.frame.most_common_vectors().or_else(|| b.frame.most_common_vectors());
-                    let estimate = search::search(&a.frame, &b.frame, hint);
-
-                    a.add_full_compare(b.idx, estimate);
-                    b.add_full_compare(a.idx, estimate.reverse());
-
-                }
-                _ => return run
-
-            }
+    fn compare_frames(newer: &mut MVFrame, older: &mut MVFrame) -> Estimate {
+        if let Some(est) =  newer.full_compare(older.idx) {
+            return est;
         }
+
+        let hint = newer.frame.most_common_vectors().or_else(|| newer.frame.most_common_vectors());
+        let estimate = search::search(&newer.frame, &older.frame, hint);
+
+        newer.add_full_compare(older.idx, estimate);
+        older.add_full_compare(newer.idx, estimate.reverse());
+        estimate
     }
 
-    fn run_length(&self) -> Run {
+    fn run_length(&mut self) -> Run {
 
         if self.frames.len() < 1 {
             return Run::Still;
@@ -449,8 +446,8 @@ impl PanFinder {
          */
 
 
-        let initial_still = (&self.frames[0].mv_info).forward_still_blocks();
-        let mut prev_motion = (&self.frames[0].mv_info).forward_dominant_angle();
+        let initial_still = (&self.frames[0].mv_info).still_blocks(::motion::vectors::Direction::Forward);
+        let mut prev_motion = (&self.frames[0].mv_info).dominant_angle(::motion::vectors::Direction::Forward);
 
         let mut motion_frames = 0;
         let mut last = self.frames[0].idx as usize;
@@ -460,26 +457,29 @@ impl PanFinder {
             return Run::Still;
         }
 
-        for frame in self.frames.iter().skip(1).chain(self.out.as_ref().and_then(|o| o.next_frame.as_ref()).into_iter()) {
+        let mut frame_refs : Vec<&mut MVFrame> = vec![];
+        let (a,b) = self.frames.as_mut_slices();
+        frame_refs.extend(a);
+        frame_refs.extend(b);
+        if let Some(out) = self.out.as_mut() {
+            if let Some(last) = out.next_frame.as_mut() {
+                frame_refs.push(last);
+            }
+        }
+
+        let mut end_reason = RunEnd::OutOfFrames;
+
+        for frame_idx in 1..frame_refs.len() /* self.frames.iter().skip(1).chain(self.out.as_ref().and_then(|o| o.next_frame.as_ref()).into_iter()) */ {
+            let (newer,older) = frame_refs.split_at_mut(frame_idx);
+            let (frame,older) = older.split_at_mut(1);
+            let ref mut frame = frame[0];
 
             let frac = frame.predicted_fraction();
-            let past = frame.mv_info.future();
-            let future = frame.mv_info.past();
-            let still = frame.mv_info.forward_still_blocks();
-            let motion = frame.mv_info.forward_dominant_angle();
+            let past = frame.mv_info.past();
+            let future = frame.mv_info.future();
+            let still = frame.mv_info.still_blocks(::motion::vectors::Direction::Backward);
+            let motion = frame.mv_info.dominant_angle(::motion::vectors::Direction::Backward);
 
-            // scene change
-            if past * 8 < future {
-                match frame.full_compare(frame.idx + 1) {
-                    Some(est) => {
-                        if est.error_fraction() > 5.0 {
-                            return Run::Scenechange
-                        }
-                    }
-                    None => return Run::NeedsScan(frame.idx + 1)
-
-                }
-            }
 
             // skip highly predicted still frames in the middle of pans
             // compare against next moving one
@@ -489,18 +489,50 @@ impl PanFinder {
                 continue;
             }
 
-            if (motion.0 - prev_motion.0).abs() > 23 {
-                match frame.full_compare(frame.idx + 1) {
-                    Some(est) => {
-                        if est.error_fraction() > 5.0 {
-                            break;
-                        }
-                    }
-                    None => return Run::NeedsScan(frame.idx + 1)
+            // potential scene change
+            if past * 8 < future {
+                let idx = newer.len()-1;
+                let ref mut newer = newer[idx];
+                let est = PanFinder::compare_frames(newer, frame);
+                let vec = MVec::new().from_vector(est.x, est.y);
+                if est.error_fraction() > 5.0 && (vec.angle() - prev_motion.0).abs() > 23 {
+                    return Run::Scenechange
                 }
             }
+
+
+            if (motion.0 - prev_motion.0).abs() > 23 {
+                let idx = newer.len()-1;
+                let ref mut newer = newer[idx];
+                let est = PanFinder::compare_frames(newer, frame);
+                let vec = MVec::new().from_vector(est.x, est.y);
+                if est.error_fraction() > 5.0 && (vec.angle() - prev_motion.0).abs() > 23 {
+                    end_reason = RunEnd::DirectionChange;
+                    break;
+                }
+            }
+
+            let current = frame.idx as usize;
+
+            // skipped frames, verify that it's still the same scene
+            if current + 1 != last {
+
+                let last_idx = match newer.iter().position(|f| f.idx == last as u32) {
+                    Some(i) => i,
+                    None => {
+                        panic!("expected to find {} avail:{:?}; cur:{}", last, newer.iter().map(|n| n.idx).collect::<Vec<_>>(), current)
+                    }
+                };
+                let ref mut newer = newer[last_idx];
+                let est = PanFinder::compare_frames(newer, frame);
+                if est.error_fraction() > 5.0 {
+                    end_reason = RunEnd::MismatchAfterStills;
+                    break
+                }
+            }
+
             prev_motion = motion;
-            last = frame.idx as usize;
+            last = current;
             motion_frames += 1;
         }
 
@@ -508,7 +540,7 @@ impl PanFinder {
             return Run::Still;
         }
 
-        return Run::Run{motion_frames, oldest_frame: last};
+        return Run::Run{motion_frames, oldest_frame: last, end: end_reason};
     }
 
     fn output_path(&self) -> PathBuf {
@@ -518,21 +550,21 @@ impl PanFinder {
         dir
     }
 
-    fn try_open_batch(&mut self) {
+    fn try_open_batch(&mut self, run: Run) {
         if self.out.is_some() {
             return;
         }
 
-        let run = match self.run_length() {
-            Run::Run{motion_frames, oldest_frame} => (motion_frames, oldest_frame),
+        let run_info = match run {
+            Run::Run{motion_frames, oldest_frame, ..} => (motion_frames, oldest_frame),
             _ => return
         };
 
-        if run.0 < 6 {
+        if run_info.0 < 6 {
             return;
         }
 
-        let start_frame = run.1;
+        let start_frame = run_info.1;
 
         let dir = self.output_path();
         ::std::fs::create_dir_all(&dir).unwrap();
@@ -550,6 +582,8 @@ impl PanFinder {
                 writeln!(log, "mv: {:?}", mvs);
             }
         }
+
+        writeln!(log, "{:?}", run);
 
 
         let image2format = format!("{:06}+%03d.{}", start_frame, self.format.extension());

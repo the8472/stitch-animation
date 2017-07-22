@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use float_ord::FloatOrd;
 use simd::u8x16;
 // TODO: generic implementation
-use simd::x86::avx::u8x32;
 use simd::x86::sse2::Sse2U8x16;
 use simd::x86::ssse3::Ssse3U8x16;
 use stdsimd::simd as simd2;
@@ -109,7 +108,7 @@ pub fn search(a: &Video, b: &Video, hint: Option<(isize, isize)>) -> Estimate {
         };
 
         let tuples : Vec<_> = (0..range).map(|i| 1 << i).chain(Some(0).into_iter()).flat_map(|i: isize| {
-            let mut directions = vec![
+            let directions = vec![
                 (x,y+i),(x,y-i), (x+i, y), (x-i,y),
             ];
 
