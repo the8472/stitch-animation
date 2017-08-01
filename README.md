@@ -1,6 +1,6 @@
 # stitch-animation
 
-Linear panning detection, scene extraction and image compositing using motion vectors provided by video codecs.
+Linear panning detection, scene extraction and image compositing.
 
 Supports multi-threading, depending on CPU capacity, video resolution and passed arguments
 it should run 2-10x faster than normal playback speed.
@@ -72,7 +72,6 @@ ARGS:
 ## Current limitations
 
 * x86 only
-* only codecs for which libavcodec exports motion vectors are supported (e.g. the mpeg family)
 * any kind of non-linear motion is not actively supported. they just may happen to work anyway.
   this includes zoom, rotations, perspective distortions.
   Long stops during a pan may also lead to disjoint sequences.
@@ -89,7 +88,6 @@ ARGS:
   * analyze the areas moving into and out of a frame, i.e. how clean the pan is
 * zoom and rotation support
   * infer affine transforms from vectors? or search separately for those operations?
-* use ffmpeg's `mestimate` filter to construct vectors if none are present (would help with I-frames too)
 * performance improvements
   * skip some frames containing redundant information on perfectly horizontal or vertical pans to reduce encoding load
 * skip ranges if they're already decoded on disk

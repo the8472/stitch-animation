@@ -15,8 +15,8 @@ extern crate euclid;
 extern crate itertools;
 extern crate float_ord;
 extern crate atomic;
-extern crate stdsimd;
 extern crate oxipng;
+extern crate std_semaphore;
 
 mod stitchers;
 mod motion;
@@ -28,11 +28,12 @@ use clap::{Arg, App};
 use std::io::BufRead;
 use motion::vectors::MVInfo;
 use pipeline::{PanFinder, Format, MVPrefilter, MVFrame};
+use rayon::prelude::*;
 
 
 
 
-fn process_video(input: &Path, stitch: bool, format: Format, start: u32, max_frames: u32, optimize: bool) {
+fn process_video(input: &Path, config: Config) {
     match ffmpeg::format::input(&input) {
         Ok(mut ctx) => {
             let mut vdecoder;
@@ -77,37 +78,82 @@ fn process_video(input: &Path, stitch: bool, format: Format, start: u32, max_fra
             use std::sync::mpsc::sync_channel;
 
             let (to_prefilter, prefilter_in) = sync_channel(25);
-            let (to_writer, writer_in) = sync_channel(25);
+            let (to_pan_finder, finder_rx) = sync_channel(25);
+            let (to_image_writer, writer_rx) = sync_channel(3);
 
             thread::spawn(move || {
-                let mut filter = MVPrefilter::new();
+                let mut filter = MVPrefilter::new(config.subsample);
 
-                while let Ok(Some(mv_frame)) = prefilter_in.recv() {
-                    filter.add_frame(mv_frame);
-                    if let Some(frame) = filter.poll() {
-                        to_writer.send(Some(frame)).unwrap();
+                let mut batch = vec![];
+
+                loop {
+                    batch.push(match prefilter_in.recv() {
+                        Ok(mv_frame) => mv_frame,
+                        _ => break
+                    });
+
+                    batch.extend(prefilter_in.try_iter().take(rayon::current_num_threads()-1));
+
+                    //filter.add_frame(mv_frame);
+                    filter.add_frames(&mut batch);
+
+
+                    while let Some(frame) = filter.poll() {
+                        to_pan_finder.send(frame).unwrap();
                     }
                 }
 
                 for remainder in filter.drain() {
-                    to_writer.send(Some(remainder)).unwrap();
+                    to_pan_finder.send(remainder).unwrap();
                 }
-                to_writer.send(None).unwrap();
             });
 
 
+            let p = PanFinder::output_path_from_input(&input);
+            let p2 = p.clone();
 
-            let p = input.to_owned();
+            thread::spawn(move || {
+                let mut writer = PanFinder::new(p, config);
+
+                while let Ok(mv_frame) = finder_rx.recv() {
+                    writer.add_frame(mv_frame);
+                    for out in writer.image_batches.drain(..).filter(|out| {
+                        out.expansion_ratio() < config.min_expand
+                    }) {
+                        to_image_writer.send(out).unwrap();
+                    }
+                }
+
+                for out in writer.close().into_iter().filter(|out| {
+                    out.expansion_ratio() < config.min_expand
+                }) {
+                    to_image_writer.send(out).unwrap();
+                }
+            });
 
             let thread = thread::spawn(move || {
-                let mut writer = PanFinder::new(p, stitch, format, optimize);
 
-                while let Ok(Some(mv_frame)) = writer_in.recv() {
-                    writer.add_frame(mv_frame);
+                loop {
+                    let mut batch = vec![];
+                    batch.push(match writer_rx.recv() {
+                        Ok(stitcher) => stitcher,
+                        _ => break
+                    });
+
+                    batch.extend(writer_rx.try_iter());
+
+                    batch.into_par_iter().for_each(|stitcher| {
+                        stitcher.write_linear_stitch(config.optimize, &p2);
+                    });
                 }
             });
 
             let mut frame_counter = 0;
+
+
+            let ctxptr = unsafe {
+                ctx.as_mut_ptr()
+            };
 
             for (stream, packet) in ctx.packets() {
                 if stream.index() != vid_idx {
@@ -115,7 +161,7 @@ fn process_video(input: &Path, stitch: bool, format: Format, start: u32, max_fra
                 }
 
                 // TODO: find previous keyframe, seek back, skip forwards while decoding
-                if frame_counter < start {
+                if frame_counter < config.seek {
                     frame_counter += 1;
                     continue;
                 }
@@ -127,31 +173,43 @@ fn process_video(input: &Path, stitch: bool, format: Format, start: u32, max_fra
                     vdecoder.height(),
                 );
 
+
                 match vdecoder.decode(&packet, &mut frame) {
                     Ok(true) => {
-                        let frame_type;
+
                         //let frame_idx = frame.display_number();
 
-                        unsafe {
-                            let ptr = frame.as_ptr();
-                            frame_type = (*ptr).pict_type;
-                        }
+                        let (sar,frame_type) = unsafe {
+                            let frame_ptr = frame.as_mut_ptr();
+                            use ffmpeg::ffi::*;
 
-                        let mv_frame =
-                            MVFrame::new(MVInfo::new(), frame, frame_type, frame_counter);
-                        to_prefilter.send(Some(mv_frame)).unwrap();
+                            (av_guess_sample_aspect_ratio(ctxptr,
+                                                          stream.as_ptr() as *mut AVStream,
+                                                          frame_ptr),
+                             (*frame_ptr).pict_type
+                            )
+                        };
 
-                        if frame_counter > start.saturating_add(max_frames) {
+
+                        let mv_frame = MVFrame::new(MVInfo::new(), frame, frame_type, frame_counter, sar.into());
+                        to_prefilter.send(mv_frame).unwrap();
+
+                        if frame_counter > config.seek.saturating_add(config.max_frames) {
                             break;
                         }
-                    }
-                    _ => {}
-                }
 
-                frame_counter += 1;
+                        frame_counter += 1;
+                    }
+                    Ok(false) => {
+                        // TODO: handle decoder flushing at end of stream
+                    }
+                    Err(e) => {
+                        eprintln!("{:?}", e);
+                    }
+                }
             }
 
-            to_prefilter.send(None).unwrap();
+            drop(to_prefilter);
 
             thread.join().unwrap();
         }
@@ -161,25 +219,44 @@ fn process_video(input: &Path, stitch: bool, format: Format, start: u32, max_fra
     }
 }
 
+#[derive(Copy,Clone)]
+struct Config {
+    optimize: bool,
+    single_frame_format: Format,
+    seek: u32,
+    max_frames :u32,
+    subsample: u8,
+    min_expand: f32,
+    log: bool,
+    stitch: bool
+}
+
 fn main() {
     let matches = App::new("animation linear panning detection, scene extraction and stitching for videos")
         .version(crate_version!())
         .arg(Arg::with_name("nostitch").long("nostitch").required(false).takes_value(false)
             .help("do not create composite images"))
+        .arg(Arg::with_name("pic_format").short("p").long("pictures").required(false).takes_value(true)
+            .possible_values(&["png","jpg"]).help("write individual frames of detected pans to disk"))
         .arg(Arg::with_name("opt").long("opt").required(false).takes_value(false)
             .help("optimize composite PNGs for size [slower]"))
-        .arg(Arg::with_name("pics").short("p").long("pictures").required(false).takes_value(true)
-            .possible_values(&["png","jpg"]).help("save individual frames"))
         .arg(Arg::with_name("inputs").index(1).multiple(true).required(true)
             .help("videos files to process. specify '-' to read a newline-separated list from stdin.\nExample: find /media/videos -type f -name '*.mkv' | stitch-animation -"))
         .arg(Arg::with_name("seek_to").short("s").takes_value(true).help("seek to frame number [currently inaccurate, specify a lower number than the desired actual frame]"))
         .arg(Arg::with_name("N").short("n").takes_value(true).help("process at most N frames, after seeking"))
+        .arg(Arg::with_name("log").long("log").takes_value(false).help("log debug info"))
+        .arg(Arg::with_name("min").long("min").takes_value(true)
+            .default_value("20")
+            .help("composites must be at least min% larger than the video frame size [higher = faster, may miss small pans]"))
+        .arg(Arg::with_name("S").long("sub").takes_value(true)
+            .possible_values(&["1","2","4", "8"])
+            .help("subsample motion search by a factor of S. default 2 @ >= 720p, 4 @ >= 1080p, 1 otherwise. [higher = faster, less accurate]"))
         .get_matches();
 
 
     ffmpeg::init().unwrap();
 
-    let stitch = !matches.is_present("nostitch");
+
 
     if !cfg!(debug_assertions) {
         unsafe {
@@ -187,21 +264,27 @@ fn main() {
         }
     }
 
-    let format = value_t!(matches, "pics", Format).unwrap_or(Format::NULL);
-    let seek = value_t!(matches, "seek_to", u32).unwrap_or(0);
-    let max_frames = value_t!(matches, "N", u32).unwrap_or(std::u32::MAX);
-    let optimize = matches.is_present("opt");
+    let config = Config {
+        stitch: !matches.is_present("nostitch"),
+        log: matches.is_present("log"),
+        single_frame_format: value_t!(matches, "pic_format", Format).unwrap_or(Format::NULL),
+        seek: value_t!(matches, "seek_to", u32).unwrap_or(0),
+        subsample: value_t!(matches, "S", u8).unwrap_or(0),
+        min_expand: (value_t!(matches, "min", u16).unwrap() as f32 / 100.0) + 1.0,
+        max_frames: value_t!(matches, "N", u32).unwrap_or(std::u32::MAX),
+        optimize: matches.is_present("opt"),
+    };
 
     for p in matches.values_of_os("inputs").unwrap().map(Path::new) {
         if p == Path::new("-") {
             let stdin = std::io::stdin();
             let reader = stdin.lock();
             for line in reader.lines() {
-                process_video(Path::new(&line.unwrap()), stitch, format, seek, max_frames, optimize);
+                process_video(Path::new(&line.unwrap()), config);
             }
             continue;
         }
-        process_video(p, stitch, format, seek, max_frames, optimize);
+        process_video(p, config);
     }
 
     let counts = motion::search::COUNTS.load(atomic::Ordering::Relaxed);

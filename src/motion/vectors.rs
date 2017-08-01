@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::fmt::*;
 use std::mem::size_of;
 use itertools::Itertools;
+use std::cmp::min;
+
 
 pub(crate) trait ToMotionVectors {
     fn motion_vecs(&self) -> Option<&[AVMotionVector]>;
@@ -111,6 +113,22 @@ impl MVec {
     pub fn angle(&self) -> i16 {
         self.angle
     }
+
+    pub fn is_similar(&self, other: &MVec) -> bool {
+        if self.len == 0 && other.len == 0 {
+            return true
+        }
+
+        if self.len != 0 && other.len != 0 &&
+            (self.len - other.len).abs() <= min(self.len,other.len) &&
+            (self.angle() - other.angle()).abs() < 23 {
+            return true
+        }
+
+        false
+
+    }
+
 }
 
 

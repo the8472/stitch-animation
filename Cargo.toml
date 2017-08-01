@@ -8,6 +8,7 @@ authors = ["The8472 <git@infinite-source.de>"]
 lto = true
 debug = true
 panic = 'abort'
+opt-level = 3
 
 
 [profile.dev]
@@ -18,7 +19,7 @@ codegen-units = 4
 #ffmpeg = {version = "0.2.0-alpha.2", git = "https://github.com/retrry/rust-ffmpeg.git", rev = "db95408164d278809b12e2e77ed90025ed6431ec" }
 ffmpeg = {version = "0.2.0-alpha.2", git = "https://github.com/meh/rust-ffmpeg.git", rev = "8cf47c7ec6356a1d0a9cd53ffa67c424d2e800c7" }
 #ffmpeg = {version = "0.2.0-alpha.2", git = "https://github.com/meh/rust-ffmpeg.git" }
-stdsimd = {version = "0.0.1", git = "https://github.com/BurntSushi/stdsimd.git", rev = "ff6021b72e8cc1e7db942847d99278fe0056c245"}
+#stdsimd = {version = "0.0.1", git = "https://github.com/BurntSushi/stdsimd.git", rev = "ff6021b72e8cc1e7db942847d99278fe0056c245"}
 libc = "0.2.0"
 clap = "2.25.0"
 rand = "0.3"
@@ -29,11 +30,21 @@ itertools = "0.6.1"
 float-ord = "0.1.2"
 atomic = {version = "0.3.4", features = ["nightly"]}
 oxipng = "0.16.3"
+std-semaphore = "0.1.0"
 
-[replace]
+#[replace]
 #"ffmpeg-sys:3.3.2" = {git = "https://github.com/meh/rust-ffmpeg-sys.git" }
-"ffmpeg-sys:3.2.1" = {path = "./ffmpeg-sys"}
-"simd:0.2.0" = {path = "../simd"}
+#"ffmpeg-sys:3.3.2" = {git = "https://github.com/rrty/rust-ffmpeg-sys.git" }
+#"ffmpeg-sys:3.2.1" = {path = "./ffmpeg-sys"}
+#"simd:0.2.0" = {git = "https://github.com/the8472/simd.git", branch = "avx_sad_shuffle"}
+
+[patch.crates-io]
+#ffmpeg-sys = {git = "https://github.com/meh/rust-ffmpeg-sys.git" }
+#ffmpeg-sys = { path = "../rust-ffmpeg-sys" }
+"ffmpeg-sys" = {path = "./ffmpeg-sys"}
+#ffmpeg-sys = {git = "https://github.com/retrry/rust-ffmpeg-sys.git", branch = "motion_vector" }
+simd = {git = "https://github.com/the8472/simd.git", branch = "avx_sad_shuffle"}
+
 
 
 [features]
